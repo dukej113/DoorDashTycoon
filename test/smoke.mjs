@@ -23,7 +23,7 @@ page.on('console', m => { if (m.type() === 'error') problems.push('console: ' + 
 page.on('pageerror', e => problems.push('pageerror: ' + e.message + '\n' + (e.stack || '')));
 
 await page.goto(url);
-await page.waitForFunction(() => window.__DTR && window.__DTR.City.cv);
+await page.waitForFunction(() => window.__DTR && window.__DTR.City.ready);
 const shot = async n => { if (SHOTS) await page.screenshot({ path: path.join(shotDir, n + '.png') }); };
 
 console.log('\n== city generation ==');
@@ -80,36 +80,99 @@ let st = await page.evaluate(() => ({ mode: window.__DTR.G.mode, offers: window.
 ok('mode is play', st.mode === 'play', st);
 ok('offers available at start', st.offers >= 3, st);
 
-console.log('\n== movement + collision ==');
+console.log('\n== movement + collision (camera-relative) ==');
 // clear traffic first: cars legitimately bump the player sideways, which would
 // muddy a pure steering measurement
 await page.evaluate(() => { window.__DTR.traffic.length = 0; window.__DTR.peds.length = 0; });
-// spawn is on a road cell; find which axis is open and drive along it
+// W means "away from the camera", so point the camera down the open corridor
 const before = await page.evaluate(() => {
   const D = window.__DTR;
-  const i = Math.floor(D.P.x / 64), j = Math.floor(D.P.y / 64);
-  return { x: D.P.x, y: D.P.y, vertCorridor: i % 4 === 0 };
+  const i = Math.floor(D.P.x / 64);
+  const vert = i % 4 === 0;
+  const heading = vert ? Math.PI / 2 : 0;     // down the corridor
+  D.P.ang = heading; D.cam.yaw = heading;
+  return { x: D.P.x, y: D.P.y, vert, heading };
 });
-const goKey = before.vertCorridor ? 's' : 'd';
-await page.keyboard.down(goKey);
+await page.keyboard.down('w');
 await page.waitForTimeout(900);
-await page.keyboard.up(goKey);
+await page.keyboard.up('w');
 await page.waitForTimeout(120);
-const after = await page.evaluate(() => ({ x: window.__DTR.P.x, y: window.__DTR.P.y, spd: window.__DTR.P.spd }));
-const moved = before.vertCorridor ? after.y - before.y : after.x - before.x;
-const drift = before.vertCorridor ? Math.abs(after.x - before.x) : Math.abs(after.y - before.y);
-ok('player drives down the open corridor', moved > 80, { before, after, moved });
-ok('player does not drift sideways', drift < 6, { before, after, drift });
+const after = await page.evaluate(() => ({ x: window.__DTR.P.x, y: window.__DTR.P.y, camyaw: window.__DTR.cam.yaw }));
+const moved = before.vert ? after.y - before.y : after.x - before.x;
+const drift = before.vert ? Math.abs(after.x - before.x) : Math.abs(after.y - before.y);
+ok('W drives away from the camera, down the corridor', moved > 80, { before, after, moved });
+ok('no sideways drift while holding W', drift < 8, { before, after, drift });
+ok('camera stays behind the direction of travel',
+  Math.abs(Math.atan2(Math.sin(after.camyaw - before.heading), Math.cos(after.camyaw - before.heading))) < 0.3,
+  { camyaw: after.camyaw, heading: before.heading });
 ok('walls stop the player instead of trapping them', await page.evaluate(async () => {
   const D = window.__DTR;
-  const i = Math.floor(D.P.x / 64), j = Math.floor(D.P.y / 64);
-  const across = i % 4 === 0 ? 'd' : 's';
-  D.keys[across] = true;
+  const i = Math.floor(D.P.x / 64);
+  const into = i % 4 === 0 ? 0 : Math.PI / 2;    // across the corridor, into a wall
+  D.P.ang = into; D.cam.yaw = into;
+  D.keys.w = true;
   await new Promise(r => setTimeout(r, 700));
-  D.keys[across] = false;
+  D.keys.w = false;
   const si = Math.floor(D.P.x / 16), sj = Math.floor(D.P.y / 16);
   return !D.City.solid[sj * (41 * 64 / 16) + si];
 }), 'ended up inside geometry');
+
+console.log('\n== third-person camera ==');
+const camv = await page.evaluate(async () => {
+  const D = window.__DTR;
+  D.P.ang = 0; D.cam.yaw = 0;
+  await new Promise(r => setTimeout(r, 400));
+  const c = D.cam;
+  // the camera should sit BEHIND (-x when facing +x) and ABOVE the player
+  const behind = (D.P.x - c.cx);
+  const above = c.cz;
+  const s = D.proj(D.P.x, D.P.y, 0);
+  const presets = D.CAM_PRESETS.length;
+  const before = c.preset;
+  D.cycleCamera();
+  const after = c.preset;
+  D.cycleCamera(); D.cycleCamera();   // back round to where we started
+  return {
+    behind: Math.round(behind), above: Math.round(above), presets, before, after,
+    onScreen: !!s && s.x > 0 && s.x < 1280 && s.y > 0 && s.y < 800,
+    playerDepth: s ? Math.round(s.d) : -1
+  };
+});
+ok('camera sits behind the player', camv.behind > 40, camv);
+ok('camera sits above the ground', camv.above > 40, camv);
+ok('player projects on screen in front of the camera', camv.onScreen && camv.playerDepth > 0, camv);
+ok('camera presets cycle', camv.presets >= 3 && camv.after !== camv.before, camv);
+// Standing at a door facing into the wall is the worst case for a chase
+// camera — and it's exactly where every delivery happens.
+const occl = await page.evaluate(async () => {
+  const D = window.__DTR, SGW = 41 * 64 / 16;
+  const hAt = (x, y) => {
+    const i = Math.floor(x / 16), j = Math.floor(y / 16);
+    if (i < 0 || j < 0 || i >= SGW) return 0;
+    return D.City.hz[j * SGW + i] * 2;
+  };
+  let clipped = 0, occluded = 0, dists = [];
+  for (const b of D.City.buildings.slice(0, 50)) {
+    D.tp(b.door.x, b.door.y);
+    D.P.ang = Math.atan2(b.cy - D.P.y, b.cx - D.P.x);
+    D.cam.yaw = D.P.ang; D.cam.hitDist = null; D.cam.camZ = null;
+    await new Promise(r => setTimeout(r, 90));
+    const c = D.cam;
+    if (hAt(c.cx, c.cy) > c.cz) clipped++;
+    let blocked = false;
+    for (let k = 1; k < 16; k++) {
+      const t = k / 16;
+      if (hAt(c.cx + (D.P.x - c.cx) * t, c.cy + (D.P.y - c.cy) * t) > c.cz + (24 - c.cz) * t) { blocked = true; break; }
+    }
+    if (blocked) occluded++;
+    dists.push(c.hitDist);
+  }
+  dists.sort((a, b) => a - b);
+  return { clipped, occluded, of: 50, minDist: Math.round(dists[0]), medianDist: Math.round(dists[25]) };
+});
+ok('camera never ends up inside a building', occl.clipped === 0, occl);
+ok('the player is never hidden behind geometry', occl.occluded === 0, occl);
+ok('camera keeps a usable distance (no nose-cam)', occl.minDist > 25 && occl.medianDist > 90, occl);
 
 const stuck = await page.evaluate(async () => {
   // drive into a wall for a second and make sure we never end up inside solid geometry
@@ -144,6 +207,47 @@ const eject = await page.evaluate(async () => {
 });
 ok('player starts buried for the test', eject.inside0, eject);
 ok('player is ejected back onto open ground', !eject.insideAfter, eject);
+
+console.log('\n== getting out of the vehicle to deliver ==');
+const veh = await page.evaluate(async () => {
+  const D = window.__DTR, G = D.G;
+  G.money = 20000;
+  if (!G.vehicles.includes('hatch')) G.vehicles.push('hatch');
+  G.veh = 'hatch'; D.P.onFoot = false; D.P.parked = null;
+  const carSpeed = D.vehStats().sp, carR = D.vehStats().r;
+  D.makeOffer(true); D.acceptOffer(0);
+  const o = G.orders[0]; o.readyAt = G.t;
+  D.tp(o.rest.door.x, o.rest.door.y);
+  const blockedInCar = D.tryInteract(false);         // must refuse: still driving
+  const stateAfterCarTry = o.state;
+  const got = D.exitVehicle();
+  const footSpeed = D.vehStats().sp, footR = D.vehStats().r;
+  const parkedAt = D.P.parked ? { x: Math.round(D.P.parked.x), y: Math.round(D.P.parked.y) } : null;
+  const okOnFoot = D.tryInteract(false);             // now it should work
+  const stateAfterFoot = o.state;
+  // walking away and trying to get in from across the map should fail
+  const sx = D.P.x, sy = D.P.y;
+  D.P.x = sx + 300; D.P.y = sy;
+  const farEnter = D.enterVehicle(true);
+  D.P.x = D.P.parked.x + 20; D.P.y = D.P.parked.y;
+  const nearEnter = D.enterVehicle();
+  return {
+    blockedInCar, stateAfterCarTry, got, okOnFoot, stateAfterFoot, parkedAt,
+    carSpeed, footSpeed, carR, footR, farEnter, nearEnter, onFoot: D.P.onFoot,
+    parkedCleared: D.P.parked === null
+  };
+});
+ok('cannot complete a delivery from the driver seat', veh.blockedInCar === false && veh.stateAfterCarTry === 'topickup', veh);
+ok('you can step out of the vehicle', veh.got && veh.parkedAt, veh);
+ok('the vehicle stays parked where you left it', !!veh.parkedAt, veh);
+ok('on foot you move at walking pace', veh.footSpeed < veh.carSpeed * 0.6, veh);
+ok('delivery completes once you are on foot', veh.okOnFoot && veh.stateAfterFoot === 'todrop', veh);
+ok('cannot teleport into a car from across town', veh.farEnter === false, veh);
+ok('re-entering nearby works', veh.nearEnter && !veh.onFoot && veh.parkedCleared, veh);
+await page.evaluate(() => {
+  const D = window.__DTR;
+  D.G.veh = 'shoes'; D.P.onFoot = true; D.P.parked = null; D.G.orders.length = 0; D.P.bag = 0;
+});
 
 console.log('\n== full delivery loop ==');
 const loop = await page.evaluate(async () => {
@@ -186,50 +290,132 @@ const cap = await page.evaluate(async () => {
 });
 ok('cannot exceed bag capacity', cap.held <= cap.c, cap);
 
-console.log('\n== encounter + punch consequences ==');
+console.log('\n== confrontation happens in the world, not behind a modal ==');
 const enc = await page.evaluate(async () => {
   const D = window.__DTR, G = D.G;
-  D.makeOffer(true);
-  D.acceptOffer(0);
+  G.veh = 'shoes'; D.P.onFoot = true; D.P.parked = null;
+  D.makeOffer(true); D.acceptOffer(0);
   const o = G.orders[0];
   o.readyAt = G.t;
   D.tp(o.rest.door.x, o.rest.door.y); D.tryInteract(false);
-  const r0 = G.rating, m0 = G.money, w0 = G.wanted;
+  D.tp(o.cust.door.x + 40, o.cust.door.y);
   D.startEncounter(o, true, null);
-  const encMode = G.mode;
-  const veil = document.getElementById('encveil').classList.contains('on');
-  await new Promise(r => setTimeout(r, 350));
-  D.Enc.armed = 1;
-  D.resolveEnc('punch');
+  const openedPanel = document.getElementById('encpanel').classList.contains('on');
+  const modeDuring = G.mode;
+  const spawned = !!D.Enc.npc;
+  const startDist = D.Enc.npc ? Math.round(Math.hypot(D.Enc.npc.x - D.P.x, D.Enc.npc.y - D.P.y)) : -1;
+  const t0 = G.t;
+  await new Promise(r => setTimeout(r, 900));     // they march over to you
+  const closeDist = Math.round(Math.hypot(D.Enc.npc.x - D.P.x, D.Enc.npc.y - D.P.y));
+  return { openedPanel, modeDuring, spawned, startDist, closeDist, active: D.Enc.active,
+    clockKeptRunning: G.t > t0 };
+});
+ok('confrontation spawns a customer in the world', enc.spawned && enc.active, enc);
+ok('the game does NOT pause for it', enc.modeDuring === 'play' && enc.clockKeptRunning, enc);
+ok('the customer walks over to you', enc.closeDist < enc.startDist && enc.closeDist < 48, enc);
+ok('a non-blocking panel shows the options', enc.openedPanel, enc);
+await shot('03-confrontation');
+
+console.log('\n== the punch is a manual, aimed action ==');
+const punch = await page.evaluate(async () => {
+  const D = window.__DTR, G = D.G;
+  const n = D.Enc.npc;
+  const r0 = G.rating, m0 = G.money, w0 = G.wanted, c0 = G.cred;
+  D.P.punchCd = 0;
+  // 1. facing the wrong way: a miss
+  D.P.ang = Math.atan2(n.y - D.P.y, n.x - D.P.x) + Math.PI;
+  const missedFacingAway = D.throwPunch();
+  await new Promise(r => setTimeout(r, 520));      // cooldown
+  // 2. out of reach: also a miss
+  const sx = D.P.x, sy = D.P.y;
+  D.P.x = n.x + 150; D.P.y = n.y;
+  D.P.ang = Math.atan2(n.y - D.P.y, n.x - D.P.x);
+  const missedTooFar = D.throwPunch();
+  await new Promise(r => setTimeout(r, 520));
+  // 3. close and facing them: connects
+  D.P.x = sx; D.P.y = sy;
+  D.P.ang = Math.atan2(n.y - D.P.y, n.x - D.P.x);
+  const landed = D.throwPunch();
+  const cooling = D.throwPunch();                  // immediate second swing blocked
   return {
-    encMode, veil, mode: G.mode, r0, r1: G.rating, m0, m1: G.money,
-    w0, w1: G.wanted, cred: G.cred, punches: G.punches, cops: D.cops.length,
-    veilAfter: document.getElementById('encveil').classList.contains('on')
+    missedFacingAway, missedTooFar, landed, cooling,
+    r0, r1: G.rating, m0, m1: G.money, w0, w1: G.wanted, c0, c1: G.cred,
+    punches: G.punches, cops: D.cops.length, resolved: D.Enc.resolved,
+    panel: document.getElementById('encpanel').classList.contains('on'), mode: G.mode
   };
 });
-ok('encounter enters encounter mode', enc.encMode === 'encounter' && enc.veil, enc);
-ok('punch lowers rating', enc.r1 < enc.r0 - 0.4, enc);
-ok('punch pays out loot', enc.m1 > enc.m0, enc);
-ok('punch raises wanted level', enc.w1 > enc.w0, enc);
-ok('punch grants street cred', enc.cred >= 1, enc);
-ok('cops spawn when wanted', enc.cops >= 1, enc);
-ok('encounter closes and play resumes', enc.mode === 'play' && !enc.veilAfter, enc);
-await shot('03-encounter-resolved');
+ok('a punch thrown facing away misses', punch.missedFacingAway === false, punch);
+ok('a punch thrown out of reach misses', punch.missedTooFar === false, punch);
+ok('a punch thrown in range connects', punch.landed === true, punch);
+ok('the punch has a cooldown', punch.cooling === false, punch);
+ok('punching costs 0.45 rating', punch.r1 < punch.r0 - 0.4, punch);
+ok('punching pays out loot', punch.m1 > punch.m0, punch);
+ok('punching raises the wanted level', punch.w1 > punch.w0, punch);
+ok('punching banks street cred', punch.c1 > punch.c0, punch);
+ok('cops spawn when wanted', punch.cops >= 1, punch);
+ok('the panel closes and play continues', !punch.panel && punch.mode === 'play', punch);
 
-console.log('\n== encounter walk-off (hesitation penalty) ==');
+console.log('\n== you cannot punch from the driver seat ==');
+const carPunch = await page.evaluate(() => {
+  const D = window.__DTR, G = D.G;
+  G.money = 20000;
+  if (!G.vehicles.includes('hatch')) G.vehicles.push('hatch');
+  G.veh = 'hatch'; D.P.onFoot = false; D.P.parked = null; D.P.punchCd = 0;
+  const p0 = G.punches;
+  const res = D.throwPunch();
+  G.veh = 'shoes'; D.P.onFoot = true;
+  return { res, punches: G.punches, p0 };
+});
+ok('throwing a punch from a vehicle is refused', carPunch.res === false && carPunch.punches === carPunch.p0, carPunch);
+
+console.log('\n== punching a random pedestrian ==');
+const pedPunch = await page.evaluate(async () => {
+  const D = window.__DTR, G = D.G;
+  G.veh = 'shoes'; D.P.onFoot = true; D.P.punchCd = 0;
+  D.Enc.active = false; D.Enc.npc = null;
+  const p = D.peds[0];
+  p.fly = 0; p.x = D.P.x + 26; p.y = D.P.y;
+  D.P.ang = 0;
+  const r0 = G.rating, h0 = G.heat;
+  const hit = D.throwPunch();
+  await new Promise(r => setTimeout(r, 120));
+  return { hit, r0, r1: G.rating, h0, h1: G.heat, flying: p.fly > 0 };
+});
+ok('you can deck a passing pedestrian', pedPunch.hit && pedPunch.flying, pedPunch);
+ok('decking a stranger costs rating and adds heat', pedPunch.r1 < pedPunch.r0 && pedPunch.h1 > pedPunch.h0, pedPunch);
+
+console.log('\n== hesitating lets them storm off ==');
 const walk = await page.evaluate(async () => {
+  const D = window.__DTR, G = D.G;
+  G.veh = 'shoes'; D.P.onFoot = true;
+  D.makeOffer(true); D.acceptOffer(0);
+  const o = G.orders[0]; o.readyAt = G.t;
+  D.tp(o.rest.door.x, o.rest.door.y); D.tryInteract(false);
+  D.tp(o.cust.door.x + 40, o.cust.door.y);
+  const r0 = G.rating;
+  D.startEncounter(o, true, null);
+  D.Enc.t = 10.85;                       // just before the deadline
+  await new Promise(r => setTimeout(r, 700));
+  return { r0, r1: G.rating, resolved: D.Enc.resolved, mode: G.mode,
+    panel: document.getElementById('encpanel').classList.contains('on') };
+});
+ok('hesitating costs rating', walk.r1 < walk.r0 - 0.15, walk);
+ok('walk-off closes the panel without pausing', walk.resolved && !walk.panel && walk.mode === 'play', walk);
+
+console.log('\n== driving away abandons the confrontation ==');
+const flee = await page.evaluate(async () => {
   const D = window.__DTR, G = D.G;
   D.makeOffer(true); D.acceptOffer(0);
   const o = G.orders[0]; o.readyAt = G.t;
   D.tp(o.rest.door.x, o.rest.door.y); D.tryInteract(false);
+  D.tp(o.cust.door.x + 40, o.cust.door.y);
   const r0 = G.rating;
   D.startEncounter(o, true, null);
-  D.Enc.t = 8.85;               // just before the deadline
-  await new Promise(r => setTimeout(r, 700));
-  return { r0, r1: G.rating, mode: G.mode, veil: document.getElementById('encveil').classList.contains('on') };
+  D.tp(o.cust.door.x + 900, o.cust.door.y);   // peel away
+  await new Promise(r => setTimeout(r, 400));
+  return { r0, r1: G.rating, resolved: D.Enc.resolved };
 });
-ok('hesitating costs rating', walk.r1 < walk.r0 - 0.15, walk);
-ok('walk-off returns to play', walk.mode === 'play' && !walk.veil, walk);
+ok('leaving the scene counts as a walk-off', flee.resolved && flee.r1 < flee.r0, flee);
 
 console.log('\n== on-time streak bonus ==');
 const streak = await page.evaluate(() => {

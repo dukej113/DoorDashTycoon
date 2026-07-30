@@ -1,8 +1,13 @@
 # Dash to Riches
 
-A complete, playable **delivery tycoon** game in a single HTML file. Canvas 2D, no assets, no
-libraries, no build step — every pixel is drawn in code and every sound is synthesized with
-WebAudio oscillators and noise buffers.
+A complete, playable **third-person delivery tycoon** game in a single HTML file. Canvas 2D, no
+assets, no libraries, no build step — every pixel is drawn in code and every sound is synthesized
+with WebAudio oscillators and noise buffers.
+
+The camera sits behind and above your character through a real perspective projection: the city is
+drawn as extruded 3D geometry, painted back-to-front, with a chase camera that swings in behind
+whichever way you're facing. The *simulation* is still a 2D world on the ground plane — only the
+view is 3D — which is why collision, routing and the economy are unchanged.
 
 You start as a broke gig driver on foot with $12 and a bag. You end up running the city's
 delivery empire. In between, some customers are going to say things to you, and you get to
@@ -17,9 +22,10 @@ click, as browsers require.)
 
 1. **Take orders** from the offer list (click, or press `1`–`4`). Each shows the trip length,
    the payout and the time limit.
-2. **Drive to the restaurant**, wait for the food if it isn't ready, then run it to the customer
-   before the clock dies. A glowing route line shows the fastest way there, on the correct side
-   of the road.
+2. **Drive to the restaurant**, then **park up and press `F` to get out** — deliveries happen on
+   foot. Walk the bag to the door, wait for the food if it isn't ready, hop back in (`F`) and run
+   it to the customer before the clock dies. A glowing route line shows the fastest way there, on
+   the correct side of the road.
 3. **Get paid.** Base fare plus a tip that shrinks as the timer drains. On-time drops raise your
    rating; late ones cost you.
 4. **Reinvest** in wheels, gear, and eventually a crew of drivers who work the city on their own
@@ -32,32 +38,53 @@ $400 under and the app deactivates you (that's the lose condition).
 
 ## Controls
 
+Movement is **camera-relative**: `W` is always "away from the camera", and the camera swings in
+behind your direction of travel.
+
 | Key | Action |
 | --- | --- |
-| `WASD` / arrows | drive |
+| `WASD` / arrows | move — camera-relative |
 | `Shift` | boost / sprint (recharges) |
-| `E` | pick up / drop off (also happens automatically if you slow down at the door) |
+| `F` | **get out of / back into your vehicle** |
+| `E` | pick up / drop off (also fires automatically if you slow down at the door, on foot) |
+| `Space` | **throw a punch** — a real aimed action, on foot, any time |
+| `X` / `R` | apologize / refund during a confrontation |
 | `1`–`4` | accept an offer |
 | `Q` | cycle to your next stop (matters once you're carrying a full bag) |
+| `V` | camera angle — Close / Chase / Overwatch |
 | `Tab` | business menu |
-| `Space` | throw a punch — *only* during a confrontation |
-| `A` / `R` | apologize / refund during a confrontation |
 | `H` | horn (scatters pedestrians) |
 | `P` / `Esc` | pause · `M` mute · `N` music |
 
-Touch devices get a drag-anywhere virtual stick and a **DO IT** button.
+Touch devices get a drag-anywhere virtual stick and an action button.
+
+## Deliver on foot
+
+Pulling up outside isn't enough. Park, press `F`, and walk the bag to the door — the vehicle stays
+exactly where you left it (with a marker over it and a dot on the minimap) until you walk back and
+press `F` again. You can't complete a delivery, or throw a punch, from the driver's seat.
+
+Order timers include an allowance for parking and the walk at both ends, so the economy is
+unchanged; the trip just has a beat at each end now.
 
 ## The punch mechanic
 
-When you're late — or when the food arrives cold, wrong, or drinkless — the customer may meet you
-at the door. A procedurally-drawn, visibly furious face yells a procedurally-chosen complaint, and
-you have **nine seconds** to choose:
+When you're late — or when the food arrives cold, wrong, or drinkless — the customer comes out to
+meet you. **This is not a modal.** They spawn in the world, march over to you yelling, and the game
+keeps running the whole time: the clock ticks, traffic drives, cops keep chasing. A side panel
+shows their procedurally-drawn furious face and complaint. You have **eleven seconds**:
 
-- **Apologize** — professional, tiny rating save, zero satisfaction.
-- **Refund $5** — costs cash, buys back +0.08 rating.
-- **PUNCH** — they drop their wallet (instant cash), you gain **street cred**, and you lose
-  **0.45 rating**. If anyone sees it, your **wanted level** goes up.
-- **Hesitate** — the timer runs out, the door slams, and you eat a 0.20 rating hit for nothing.
+- **`Space` — PUNCH.** A real aimed action: you have to be *out of the car*, within reach, and
+  actually facing them, and it's on a cooldown. Swing wide and you whiff. Land it and they drop
+  their wallet (instant cash), you gain **street cred**, and you lose **0.45 rating**. If anyone
+  sees it, your **wanted level** goes up.
+- **`X` — Apologize** — professional, tiny rating save, zero satisfaction.
+- **`R` — Refund $5** — costs cash, buys back +0.08 rating.
+- **Hesitate or drive off** — the timer runs out, the door slams, and you eat a 0.20 rating hit
+  for nothing.
+
+`Space` works whenever you're on foot, not just during confrontations — including on innocent
+passers-by, who go comically airborne for a rating hit and a bump of heat.
 
 Wanted level spawns that many police cars, which path toward you through the streets with sirens
 and flashing lights. Let one sit on you for a second and you're **busted**: a fine, every order in
@@ -88,10 +115,12 @@ strategy.
 ## World
 
 A procedurally generated 2624×1984 city, regenerated from a seed each new game (the seed is
-saved, so your city comes back with your save):
+saved, so your city comes back with your save), drawn as extruded 3D geometry every frame:
 
 - Grid of streets with lane markings, crosswalks and sidewalks, ~180 buildings in subdivided lots
-  with rooftop clutter and doors facing the road
+  with banded windows that light up after dark, and doors facing the road
+- A chase camera that raises itself over rooftops and tucks in when needed, verifying line of
+  sight so the character is never hidden behind a building
 - ~50 uniquely-named restaurants, apartments, houses, offices, five named landmarks, parks with
   trees and ponds you can shortcut through (slowly, unless you buy the tires)
 - Traffic that follows lanes, turns at intersections, queues behind other cars and gives way to
@@ -106,22 +135,40 @@ saved, so your city comes back with your save):
 Two headless Playwright suites. Both drive the real page — no mocks.
 
 ```bash
-npm test          # 65 behaviour checks (~40s)
-npm run test:play # 23 live-play checks (~5 min)
+npm test          # 91 behaviour checks (~1 min)
+npm run test:play # 24 live-play checks (~6 min)
 npm run test:all
 npm run test:shots  # smoke suite + screenshots into .shots/
 ```
 
-`test/smoke.mjs` covers city generation, door reachability, movement and wall collision, the full
-accept→pickup→deliver loop, capacity limits, the encounter and its outcomes, police chase and
-bust, crew hiring and passive income, every shop tab, the day cycle, bankruptcy, victory,
-save/load round-tripping, and a random-input soak that asserts nothing goes NaN or leaks.
+`test/smoke.mjs` covers city generation, door reachability, camera-relative movement and wall
+collision, the third-person camera (behind/above, presets, never clipping into or occluded by
+geometry), getting in and out of the vehicle, the full accept→park→walk→deliver loop, capacity
+limits, the confrontation and every outcome, the punch as an aimed action (misses when facing
+away, misses out of reach, refused from the driver's seat, cooldown), police chase and bust, crew
+hiring and passive income, every shop tab, the day cycle, bankruptcy, victory, save/load
+round-tripping, and a random-input soak that asserts nothing goes NaN or leaks.
 
 `test/playability.mjs` installs an **autopilot** that plays the game through the real physics,
-collision and timers — following the same BFS route the player sees, pressing the same keys — on a
-fixed city seed. It asserts the loop is actually winnable on foot, that upgrading to a car and
+collision and timers — following the same BFS route the player sees, pressing the same
+camera-relative keys, parking up and walking the bag to each door, and deciding what to do when a
+customer comes out swinging — on a fixed city seed. It asserts the loop is actually winnable on foot, that upgrading to a car and
 then a loaded van measurably improves earnings, that stacked orders don't all expire, and that the
 punch → wanted → cops → busted escalation really fires end to end.
+
+### Measured balance (autopilot, fixed seed, per 60–75s sample)
+
+| | deliveries | $/min |
+| --- | --- | --- |
+| on foot, starting kit | 5–6 | 99–177 |
+| hatchback | 9–10 | 157–326 |
+| cargo van, bags + GPS | 6–9 | 88–242 |
+| five drivers, 2 districts | — | 199 → 726 passive |
+
+The van is the noisy one, and honestly so: the autopilot re-parks at every single door instead of
+clearing a neighbourhood on foot the way a human with twelve slots would, so it under-uses exactly
+what the van is for. The suite asserts the van works and stays profitable rather than pretending a
+cross-vehicle win is stable.
 
 ### Bugs the autopilot caught that a demo wouldn't
 
@@ -158,3 +205,13 @@ screenshot:
   It now hugs the right-hand lane, offset by an amount that leaves room for a van.
 - **`BiquadFilterNode.Q` was assigned as a number** instead of an AudioParam, which threw and
   aborted game start outright.
+
+Found during the third-person conversion:
+
+- **The chase camera clipped inside buildings**, then — once it was taught to rise over them — hid
+  the player *behind a rooftop*, which is worse. Raising alone can't guarantee visibility, so the
+  camera now tests a ladder of distance/height candidates and picks the first with a clear line of
+  sight to the player, falling back to pulling in. Verified over 50 worst-case positions (standing
+  at a door facing into the wall): 0 clipped, 0 occluded, median distance unchanged.
+- **Pedestrians rendered as black pillars**: their `hsl()` colours hit a shader that parses hex,
+  producing `rgb(NaN,…)` and silently keeping the previous fill colour.
