@@ -1050,21 +1050,28 @@ function estLimit(o, stacked) {
 function makeOffer(instant) {
   if (G.offers.length >= maxOffers()) return;
   if (!City.rests.length || !City.homes.length) return;
-  // Bias pickups toward the player and drop-offs toward the restaurant
-  // (best-of-3 sampling). Drawing both uniformly from a 2600x2000 map made
-  // every offer a cross-town trek and stacking orders pointless.
-  let rest = null, rd = Infinity;
-  for (let k = 0; k < 3; k++) {
-    const c = rpick(City.rests);
-    const d = dist2(P.x, P.y, c.door.x, c.door.y);
-    if (d < rd) { rd = d; rest = c; }
-  }
-  let cust = null, cd = Infinity;
-  for (let k = 0; k < 3; k++) {
-    const c = chance(0.10) && City.marks.length ? rpick(City.marks) : rpick(City.homes);
-    if (!c || c === rest) continue;
-    const d = dist2(rest.door.x, rest.door.y, c.door.x, c.door.y);
-    if (d < cd) { cd = d; cust = c; }
+  // Most offers are nearby (drawing uniformly from a 2600x2000 map made every
+  // job a cross-town trek), but a third are long hauls that pay much better.
+  // That mix is the point: on foot the big ones are unwinnable and you have to
+  // watch them expire, which is exactly what makes buying wheels feel good.
+  let rest = null;
+  if (chance(0.66)) {
+    let rd = Infinity;
+    for (let k = 0; k < 3; k++) {
+      const c = rpick(City.rests);
+      const d = dist2(P.x, P.y, c.door.x, c.door.y);
+      if (d < rd) { rd = d; rest = c; }
+    }
+  } else rest = rpick(City.rests);
+  let cust = null;
+  if (chance(0.7)) {
+    let cd = Infinity;
+    for (let k = 0; k < 3; k++) {
+      const c = chance(0.10) && City.marks.length ? rpick(City.marks) : rpick(City.homes);
+      if (!c || c === rest) continue;
+      const d = dist2(rest.door.x, rest.door.y, c.door.x, c.door.y);
+      if (d < cd) { cd = d; cust = c; }
+    }
   }
   if (!cust) { let t = 0; do { cust = rpick(City.homes); } while (cust === rest && t++ < 8); }
   const d = dist(rest.door.x, rest.door.y, cust.door.x, cust.door.y);
@@ -1407,7 +1414,7 @@ function newTargetFor(c) {
 }
 function buildTraffic() {
   traffic = [];
-  for (let n = 0; n < 46; n++) {
+  for (let n = 0; n < 40; n++) {
     let i, j, tries = 0;
     do { i = ri(0, GW - 1); j = ri(0, GH - 1); tries++; } while (!isRoad(i, j) && tries < 60);
     if (!isRoad(i, j)) continue;
@@ -1589,14 +1596,29 @@ function updatePlayer(dt) {
   moveWithCollision(P, dt);
   // traffic collisions
   for (const c of traffic) {
-    const d = dist(c.x, c.y, P.x, P.y);
-    const rr2 = P.r + 16;
-    if (d >= rr2) continue;
-    const nx = (P.x - c.x) / (d || 1), ny = (P.y - c.y) / (d || 1);
-    // Push out of the car WITHOUT tunnelling through walls. Writing straight
-    // to P.x/P.y let traffic shove the player inside a building, where every
-    // axis is blocked and you're stuck for the rest of the run.
-    pushSafe(P, nx * (rr2 - d), ny * (rr2 - d));
+    // A car is long and thin, so test it as an oriented box rather than a fat
+    // circle. A circle of radius 16 bulged ~6px past each flank, which put a
+    // pedestrian in contact ~40% of the time in a two-lane corridor.
+    const rx = P.x - c.x, ry = P.y - c.y;
+    const along = rx * c.dir[0] + ry * c.dir[1];
+    const perp = -rx * c.dir[1] + ry * c.dir[0];
+    const eA = 19 + P.r, eP = 11 + P.r;
+    const pA = eA - Math.abs(along), pP = eP - Math.abs(perp);
+    if (pA <= 0 || pP <= 0) continue;
+    // shove out along whichever axis is the shallower overlap — usually
+    // sideways, i.e. out of the lane
+    let nx, ny, pen;
+    if (pP <= pA) { const sg = perp < 0 ? -1 : 1; nx = -c.dir[1] * sg; ny = c.dir[0] * sg; pen = pP; }
+    else { const sg = along < 0 ? -1 : 1; nx = c.dir[0] * sg; ny = c.dir[1] * sg; pen = pA; }
+    // Push out WITHOUT tunnelling through walls: writing straight to P.x/P.y
+    // let traffic shove the player inside a building, where every axis is
+    // blocked and the run was over.
+    // Cap the per-frame separation: a full-penetration shove could fling a wide
+    // vehicle 18px sideways and pin it against the kerb. Nudge the car aside
+    // too, so heavy vehicles aren't the only ones that give.
+    const step = Math.min(pen, 7);
+    pushSafe(P, nx * step, ny * step);
+    c.x -= nx * step * 0.6; c.y -= ny * step * 0.6;
     const impact = Math.hypot(P.vx - c.dir[0] * c.spd, P.vy - c.dir[1] * c.spd);
     if (st.kind !== 'foot' && impact > 210 && P.hurt <= 0) {
       P.hurt = 0.9; c.stun = 1.2; G.crashes++;
@@ -1606,10 +1628,11 @@ function updatePlayer(dt) {
       fxText(P.x, P.y - 18, 'CRUNCH', '#ff8a7a');
       for (let i = 0; i < 8; i++) fx.push({ k: 'p', x: P.x, y: P.y, vx: rr(-120, 120), vy: rr(-140, 20), life: rr(.3, .7), c: '#ffd9a0' });
     } else {
-      // Glancing bump: shove clear of the car and bleed a little speed.
-      // Never damp multiplicatively every frame — overlapping traffic used to
-      // compound that into a dead stop you couldn't escape.
-      const damp = st.kind === 'foot' ? 0.97 : 0.90;
+      // Glancing bump: shove clear and bleed a little speed. The damp is
+      // per-SECOND, not per-frame — a per-frame multiplier compounds while
+      // you're in contact and can bring you to a dead stop. On foot there's no
+      // damping at all; being clipped shouldn't halve your walking speed.
+      const damp = st.kind === 'foot' ? 1 : Math.pow(0.55, dt);
       P.vx = P.vx * damp + nx * 45;
       P.vy = P.vy * damp + ny * 45;
     }
@@ -2814,7 +2837,10 @@ function updateRoute(dt) {
     p.push({ x: t.x, y: t.y });
     // Nudge interior nodes into the right-hand lane so following the line
     // keeps you out of oncoming traffic instead of straddling both lanes.
-    const off = Math.min(11, 25 - P.r);   // don't shove a van into the kerb
+    // Right-hand lane offset. It has to clear the oncoming lane (at -15) while
+    // staying inside the corridor: the tile at the block boundary is solid, so
+    // offset + radius must stay under 32 or you scrape the wall the whole way.
+    const off = Math.min(11, 22 - P.r);
     for (let i = 1; i < p.length - 1; i++) {
       const ax = p[i + 1].x - p[i - 1].x, ay = p[i + 1].y - p[i - 1].y;
       const l = Math.hypot(ax, ay) || 1;

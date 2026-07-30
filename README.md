@@ -142,8 +142,18 @@ screenshot:
   oscillate on the spot. The active stop is now sticky, with `Q` to cycle manually.
 - **Forcing the waypoint onto the order you just picked up** blocked batching — the entire point
   of a big bag. Van throughput more than doubled once the nearest-stop rule was allowed to choose.
-- **Offers were drawn uniformly across the whole map**, making every job a cross-town trek. Pickups
-  are now biased toward the player and drop-offs toward the restaurant.
+- **Pedestrians lost half their speed to phantom collisions.** Cars were tested as circles of
+  radius 16, which bulged ~6px past each flank — a walker was in contact with traffic **40% of the
+  time**, and a per-frame velocity damp compounded that into a crawl. Cars are now oriented boxes
+  and contact sits at 2–8%; on-foot deliveries per minute doubled.
+- **A wide vehicle could be shoved into the kerb and pinned.** Resolving the full overlap in one
+  frame flung a van 18px sideways; the push is now capped and the car gives ground too.
+- **Speed damping was per-frame rather than per-second**, so anything touching you for a second
+  brought you to a near stop regardless of frame rate.
+- **Offers were drawn uniformly across the whole map**, making every job a cross-town trek. Most
+  are now biased toward the player, but a third are deliberately long hauls — on foot those are
+  unwinnable and you watch them expire, which is what makes buying wheels feel earned. Without
+  that mix, walking earned as much per minute as a $5,600 hatchback.
 - **The route line ran down the centre of the road**, parking you permanently in oncoming traffic.
   It now hugs the right-hand lane, offset by an amount that leaves room for a van.
 - **`BiquadFilterNode.Q` was assigned as a number** instead of an AudioParam, which threw and
