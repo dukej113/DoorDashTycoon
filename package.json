@@ -1,0 +1,13 @@
+{
+  "name": "dash-to-riches",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Dash to Riches — a single-file browser delivery tycoon game (Canvas 2D, no assets, no libraries).",
+  "scripts": {
+    "test": "node test/smoke.mjs",
+    "test:shots": "node test/smoke.mjs --shots",
+    "test:play": "node test/playability.mjs",
+    "test:all": "node test/smoke.mjs && node test/playability.mjs",
+    "start": "http-server -c-1 -p 8080 ."
+  }
+}
