@@ -1,13 +1,19 @@
 # Dash to Riches
 
-A complete, playable **third-person delivery tycoon** game in a single HTML file. Canvas 2D, no
-assets, no libraries, no build step — every pixel is drawn in code and every sound is synthesized
-with WebAudio oscillators and noise buffers.
+A complete, playable **third-person delivery tycoon** game in a single HTML file. Hand-written
+WebGL2, no assets, no libraries, no build step — every mesh is generated at load, every texture is
+synthesized into a canvas and uploaded, and every sound comes from WebAudio oscillators and noise
+buffers.
 
-The camera sits behind and above your character through a real perspective projection: the city is
-drawn as extruded 3D geometry, painted back-to-front, with a chase camera that swings in behind
-whichever way you're facing. The *simulation* is still a 2D world on the ground plane — only the
-view is 3D — which is why collision, routing and the economy are unchanged.
+The camera sits behind and above your character. The *simulation* is still a 2D world on the ground
+plane (x east, y south, z up) — only the view is 3D — which is why collision, routing and the
+economy survived the conversion untouched.
+
+**Renderer:** shadow depth pass → HDR forward pass (analytic sky, GGX specular, PCF shadow map,
+height-map contact AO, up to 8 street-lamp point lights plus a headlight spot, height fog) → bloom
+chain → composite (ACES tonemap, bloom, depth of field, camera motion blur, vignette, grain) →
+FXAA, with 4× MSAA on the main pass at Ultra. Three quality presets on `G`, and it steps itself
+down automatically if the first seconds of play run below 24 fps.
 
 You start as a broke gig driver on foot with $12 and a bag. You end up running the city's
 delivery empire. In between, some customers are going to say things to you, and you get to
@@ -112,6 +118,41 @@ strategy.
 - **Empire** — dispatch offices add driver slots; district expansions multiply crew earnings
   ×1.85 each, compounding. That's what carries you to $1M.
 
+## Where the ceiling actually is
+
+Being straight about this, since it was asked:
+
+**What hand-written WebGL gets you here.** Real per-pixel lighting, a directional sun with a 2048²
+PCF shadow map, an analytic sky that also serves as the ambient and reflection probe, GGX specular
+so glass/painted metal/asphalt/concrete genuinely read differently, contact AO sampled from the
+building height field, point lights for street lamps, HDR with ACES tonemapping, bloom, depth of
+field, camera motion blur, MSAA. Those are all real, and they are the bulk of what makes an image
+look lit rather than coloured in.
+
+**What isn't achievable this way, and why.** Screen-space reflections and screen-space GI need a
+G-buffer and a deferred pipeline — buildable, but it would roughly double the renderer and the
+payoff on a city of flat-shaded boxes is small; the analytic sky reflection already covers the
+cases that read (glass, car paint, wet road). Ray-traced anything is out. Cascaded shadow maps
+would fix the ~620-unit shadow radius, but need 3-4× the shadow cost. Soft shadows are PCF, not
+area lights. Real cloth, hair, skin and facial animation need an asset pipeline and rigged meshes —
+the character is articulated boxes with a walk cycle, and it looks like articulated boxes with a
+walk cycle. Volumetric light shafts, SSAO with a proper normal buffer, parallax/normal-mapped
+surfaces and decals are all *possible* extensions; none of them are what's holding this back.
+
+**The honest limiter is content, not technique.** Every mesh here is generated from primitives at
+load. That ceiling is a stylised, well-lit toy city — not photorealism, which is a function of
+authored assets (scanned materials, modelled geometry, baked lighting) far more than of shader
+code.
+
+**Performance.** I can report the cost structure precisely: ~36k static triangles for the whole
+city in three buffers, a few hundred to ~2k instanced parts a frame, 6 draw calls for the main
+pass, 4 for the shadow pass, 5-7 full-screen post passes. What I **cannot** honestly report is a
+real frame rate: this was built and tested in a headless container whose "GPU" is SwiftShader, a
+CPU rasteriser, which turns in ~2 fps at Ultra and ~7 fps at Low — a number that says nothing about
+a real GPU. The pipeline is small enough that any discrete or recent integrated GPU should be
+comfortable at 60, but I have not measured that and won't claim it. The auto-stepdown exists
+because I couldn't verify it.
+
 ## World
 
 A procedurally generated 2624×1984 city, regenerated from a seed each new game (the seed is
@@ -129,6 +170,24 @@ saved, so your city comes back with your save), drawn as extruded 3D geometry ev
 - Day/night lighting with headlights and streetlamp pools, rain (slower roads, +30% tips), and
   surge pricing events
 - Auto-save to localStorage at the end of each day and on every purchase
+
+## Physics
+
+- **Vehicles use a traction ellipse.** You still point where you want to go, but acceleration
+  *along* the direction of travel is limited by engine power and acceleration *across* it by grip.
+  Demand more turn than the tyres have and the car washes wide and slides — `P.slide` drives a tyre
+  chirp and the body's visible drift angle. Top speed is unchanged, so the economy is unchanged.
+- **Weight transfer** drives body pitch under braking and roll into corners; wheels spin with
+  travel and the front pair steers.
+- **Collisions deflect.** The wall normal is probed from the solid grid, and velocity is reflected
+  with restitution plus tangential friction, so a glancing hit scrapes you along the wall (with
+  sparks, a scrape sound and a small yaw kick) instead of dead-stopping you. Car-to-car contact
+  exchanges momentum by mass ratio rather than shoving one side.
+- I first built a full steering/heading model — kinematic bicycle, throttle from facing angle,
+  reverse and counter-steer. It felt right in isolation and was **wrong for this game**: braking
+  and steering share one stick, so slowing down meant losing all steering authority, and the
+  autopilot's delivery rate collapsed (wedged 28 times in 60s). That's in the git history; the
+  traction ellipse is what shipped.
 
 ## Running the tests
 

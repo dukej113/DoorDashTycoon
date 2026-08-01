@@ -26,6 +26,25 @@ await page.goto(url);
 await page.waitForFunction(() => window.__DTR && window.__DTR.City.ready);
 const shot = async n => { if (SHOTS) await page.screenshot({ path: path.join(shotDir, n + '.png') }); };
 
+console.log('\n== WebGL renderer comes up ==');
+const glInfo = await page.evaluate(() => {
+  const D = window.__DTR;
+  return { ctx: !!D.gl(), ready: D.R.ready, err: D.glError(), quality: D.quality,
+    staticTris: (D.R.bufGround.count + D.R.bufMark.count + D.R.bufBld.count) / 3 };
+});
+ok('WebGL2 context created', glInfo.ctx, glInfo);
+ok('renderer initialised', glInfo.ready, glInfo);
+ok('no GL error after first frames', glInfo.err === 0, glInfo);
+ok('static city mesh built', glInfo.staticTris > 20000, glInfo);
+// draw a few frames at each quality level and make sure none of them error
+for (const q of [0, 1, 2]) {
+  await page.evaluate(qq => window.__DTR.setQuality(qq), q);
+  await page.waitForTimeout(700);
+  const e = await page.evaluate(() => window.__DTR.glError());
+  ok('quality ' + q + ' renders without GL errors', e === 0, { q, e });
+}
+await page.evaluate(() => { window.__DTR.setQuality(1); window.__DTR.setSkipRender(true); });
+
 console.log('\n== city generation ==');
 const city = await page.evaluate(() => {
   const C = window.__DTR.City;
@@ -117,6 +136,86 @@ ok('walls stop the player instead of trapping them', await page.evaluate(async (
   return !D.City.solid[sj * (41 * 64 / 16) + si];
 }), 'ended up inside geometry');
 
+console.log('\n== vehicle physics: momentum, traction, weight ==');
+const phys = await page.evaluate(async () => {
+  const D = window.__DTR, G = D.G;
+  G.money = 20000;
+  if (!G.vehicles.includes('hatch')) G.vehicles.push('hatch');
+  G.veh = 'hatch'; D.resetVehicleState();
+  D.traffic.length = 0; D.peds.length = 0;
+  const top = D.vehStats().sp;
+  // 1. momentum: you do not reach top speed instantly
+  D.tp(20 * 64 + 32, 12 * 64 + 32);
+  D.P.ang = Math.PI / 2; D.cam.yaw = Math.PI / 2;
+  D.P.vx = D.P.vy = 0;
+  D.keys.w = true;
+  await new Promise(r => setTimeout(r, 120));
+  const early = D.P.spd;
+  await new Promise(r => setTimeout(r, 1400));
+  const cruise = D.P.spd;
+  // 2. traction: demand a hard direction change at speed and it slides wide
+  const vBefore = { x: D.P.vx, y: D.P.vy };
+  D.keys.w = false; D.keys.d = true;          // hard turn across the direction of travel
+  let maxSlide = 0, maxRoll = 0;
+  for (let i = 0; i < 18; i++) {
+    await new Promise(r => setTimeout(r, 16));
+    maxSlide = Math.max(maxSlide, D.P.slide || 0);
+    maxRoll = Math.max(maxRoll, Math.abs(D.P.bodyRoll || 0));
+  }
+  const turnedBy = Math.abs(Math.atan2(D.P.vy, D.P.vx) - Math.atan2(vBefore.y, vBefore.x));
+  // 3. weight transfer under braking
+  D.keys.d = false; D.keys.s = true;
+  let maxPitch = 0;
+  for (let i = 0; i < 14; i++) {
+    await new Promise(r => setTimeout(r, 16));
+    maxPitch = Math.max(maxPitch, Math.abs(D.P.bodyPitch || 0));
+  }
+  D.keys.s = false;
+  return {
+    top: Math.round(top), early: Math.round(early), cruise: Math.round(cruise),
+    maxSlide: +maxSlide.toFixed(2), maxRoll: +maxRoll.toFixed(3),
+    maxPitch: +maxPitch.toFixed(3), turnedBy: +turnedBy.toFixed(2),
+    wheelSpin: Math.abs(D.P.wheelSpin || 0) > 0
+  };
+});
+ok('a car builds speed rather than snapping to it', phys.early < phys.top * 0.5 && phys.early > 2, phys);
+ok('a car still reaches its rated top speed', phys.cruise > phys.top * 0.86, phys);
+ok('hard cornering exceeds grip and slides', phys.maxSlide > 0.05, phys);
+ok('the body rolls into a corner', phys.maxRoll > 0.005, phys);
+ok('the body pitches under braking', phys.maxPitch > 0.004, phys);
+ok('wheels rotate with travel', phys.wheelSpin, phys);
+
+console.log('\n== collision deflects rather than dead-stops ==');
+const deflect = await page.evaluate(async () => {
+  const D = window.__DTR;
+  D.traffic.length = 0; D.peds.length = 0;
+  // stand off a building's door side and drive into its wall at a shallow angle
+  const b = D.City.buildings.find(x => x.w > 70 && x.h > 70) || D.City.buildings[0];
+  const into = Math.atan2(b.cy - b.door.y, b.cx - b.door.x);   // door -> wall
+  D.tp(b.door.x - Math.cos(into) * 6, b.door.y - Math.sin(into) * 6);
+  const ang = into + 0.62;                      // shallow, glancing
+  D.P.ang = ang;
+  D.P.vx = Math.cos(ang) * 320; D.P.vy = Math.sin(ang) * 320;
+  D.keys.w = D.keys.a = D.keys.s = D.keys.d = false;
+  let best = 0;
+  for (let i = 0; i < 26; i++) {
+    await new Promise(r => setTimeout(r, 16));
+    best = Math.max(best, D.P.spd);
+    if (D.P.spd < 40) break;
+  }
+  const along = D.P.spd;                        // some speed survives the graze
+  const si = Math.floor(D.P.x / 16), sj = Math.floor(D.P.y / 16);
+  return { speedAfter: Math.round(D.P.spd), along: Math.round(along),
+    inside: !!D.City.solid[sj * (41 * 64 / 16) + si] };
+});
+ok('a glancing hit keeps you moving along the wall', deflect.along > 20, deflect);
+ok('deflection never pushes you into geometry', !deflect.inside, deflect);
+await page.evaluate(() => {
+  const D = window.__DTR;
+  D.buildTraffic(); D.buildPeds();
+  D.G.veh = 'shoes'; D.resetVehicleState();
+});
+
 console.log('\n== third-person camera ==');
 const camv = await page.evaluate(async () => {
   const D = window.__DTR;
@@ -156,7 +255,7 @@ const occl = await page.evaluate(async () => {
     D.tp(b.door.x, b.door.y);
     D.P.ang = Math.atan2(b.cy - D.P.y, b.cx - D.P.x);
     D.cam.yaw = D.P.ang; D.cam.hitDist = null; D.cam.camZ = null;
-    await new Promise(r => setTimeout(r, 90));
+    await new Promise(r => setTimeout(r, 160));
     const c = D.cam;
     if (hAt(c.cx, c.cy) > c.cz) clipped++;
     let blocked = false;
@@ -394,6 +493,7 @@ const walk = await page.evaluate(async () => {
   D.tp(o.cust.door.x + 40, o.cust.door.y);
   const r0 = G.rating;
   D.startEncounter(o, true, null);
+  D.tp(o.cust.door.x + 130, o.cust.door.y);   // out of auto-delivery range
   D.Enc.t = 10.85;                       // just before the deadline
   await new Promise(r => setTimeout(r, 700));
   return { r0, r1: G.rating, resolved: D.Enc.resolved, mode: G.mode,
@@ -411,9 +511,13 @@ const flee = await page.evaluate(async () => {
   D.tp(o.cust.door.x + 40, o.cust.door.y);
   const r0 = G.rating;
   D.startEncounter(o, true, null);
-  D.tp(o.cust.door.x + 900, o.cust.door.y);   // peel away
-  await new Promise(r => setTimeout(r, 400));
-  return { r0, r1: G.rating, resolved: D.Enc.resolved };
+  // peel away to the far side of the map (a fixed +900 can clamp at the world
+  // edge and leave us still within earshot)
+  D.tp(o.cust.door.x > 1300 ? 220 : 2400, o.cust.door.y > 1000 ? 220 : 1760);
+  await new Promise(r => setTimeout(r, 600));
+  return { r0, r1: G.rating, resolved: D.Enc.resolved, mode: G.mode, active: D.Enc.active,
+    onFoot: D.P.onFoot, orders: G.orders.length,
+    d: D.Enc.npc ? Math.round(Math.hypot(D.Enc.npc.x - D.P.x, D.Enc.npc.y - D.P.y)) : -1 };
 });
 ok('leaving the scene counts as a walk-off', flee.resolved && flee.r1 < flee.r0, flee);
 

@@ -24,6 +24,10 @@ page.on('pageerror', e => problems.push('pageerror: ' + e.message));
 page.on('console', m => { if (m.type() === 'error') problems.push('console: ' + m.text()); });
 await page.goto(url);
 await page.waitForFunction(() => window.__DTR && window.__DTR.City.ready);
+// The headless GPU is a software rasteriser (~2 fps with the full pipeline),
+// which would make this a benchmark of SwiftShader rather than of the game.
+// The sim is frame-rate independent, so run it without drawing.
+await page.evaluate(() => window.__DTR.setSkipRender(true));
 
 // ---- autopilot, installed inside the page ----------------------------------
 // It plays the game the way a person does: camera-relative WASD, park the car
@@ -194,10 +198,12 @@ await reset({ money: 0, veh: 'hatch' });
 const car = await playFor(75000, 'car');
 // px/s is dominated by waiting at doors, so compare the design numbers
 const speeds = await page.evaluate(() => {
-  const D = window.__DTR, G = D.G, was = G.veh;
-  G.veh = 'shoes'; const onFoot = D.vehStats().sp;
-  G.veh = 'hatch'; const inCar = D.vehStats().sp;
-  G.veh = was;
+  const D = window.__DTR, G = D.G, was = G.veh, wasFoot = D.P.onFoot;
+  // vehStats() reports walking speed while you're out of the car, so the
+  // comparison has to put us back in the driver's seat first
+  D.P.onFoot = true; G.veh = 'shoes'; const onFoot = D.vehStats().sp;
+  D.P.onFoot = false; G.veh = 'hatch'; const inCar = D.vehStats().sp;
+  G.veh = was; D.P.onFoot = wasFoot;
   return { onFoot, inCar };
 });
 ok('a car is substantially faster than walking', speeds.inCar > speeds.onFoot * 2, speeds);
